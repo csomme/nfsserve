@@ -153,13 +153,13 @@ pub async fn handle_nfs(
         NFSProgram::NFSPROC3_MKDIR => nfsproc3_mkdir(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_SYMLINK => nfsproc3_symlink(xid, input, output, context).await?,
         NFSProgram::NFSPROC3_READLINK => nfsproc3_readlink(xid, input, output, context).await?,
+        NFSProgram::NFSPROC3_COMMIT => nfsproc3_commit(xid, input, output, context).await?,
         _ => {
             warn!("Unimplemented message {:?}", prog);
             proc_unavail_reply_message(xid).serialize(output)?;
         } /*
           NFSPROC3_MKNOD,
           NFSPROC3_LINK,
-          NFSPROC3_COMMIT,
           INVALID*/
     }
     Ok(())
@@ -1228,16 +1228,20 @@ pub async fn nfsproc3_write(
         Err(_) => nfs::pre_op_attr::Void,
     };
 
-    match context.vfs.write(id, args.offset, &args.data).await {
-        Ok(fattr) => {
-            debug!("write success {:?} --> {:?}", xid, fattr);
+    // Parse the stable flag to determine stability level
+    let stable_how = stable_how::from_u32(args.stable).unwrap_or(stable_how::UNSTABLE);
+
+    // Call write with the stability level
+    match context.vfs.write_with_stability(id, args.offset, &args.data, stable_how).await {
+        Ok((fattr, committed)) => {
+            debug!("write success {:?} --> {:?}, committed: {:?}", xid, fattr, committed);
             let res = WRITE3resok {
                 file_wcc: nfs::wcc_data {
                     before: pre_obj_attr,
                     after: nfs::post_op_attr::attributes(fattr),
                 },
                 count: args.count,
-                committed: stable_how::FILE_SYNC,
+                committed, // Use the actually committed stability level
                 verf: context.vfs.serverid(),
             };
             make_success_reply(xid).serialize(output)?;
@@ -1249,6 +1253,117 @@ pub async fn nfsproc3_write(
             make_success_reply(xid).serialize(output)?;
             stat.serialize(output)?;
             nfs::wcc_data::default().serialize(output)?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Default)]
+struct COMMIT3args {
+    file: nfs::nfs_fh3,
+    offset: nfs::offset3,
+    count: nfs::count3,
+}
+XDRStruct!(COMMIT3args, file, offset, count);
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Default)]
+struct COMMIT3resok {
+    file_wcc: nfs::wcc_data,
+    verf: nfs::writeverf3,
+}
+XDRStruct!(COMMIT3resok, file_wcc, verf);
+
+/*
+COMMIT3res NFSPROC3_COMMIT(COMMIT3args) = 21;
+
+struct COMMIT3args {
+    nfs_fh3  file;
+    offset3  offset;
+    count3   count;
+};
+
+struct COMMIT3resok {
+    wcc_data    file_wcc;
+    writeverf3  verf;
+};
+
+struct COMMIT3resfail {
+    wcc_data    file_wcc;
+};
+
+union COMMIT3res switch (nfsstat3 status) {
+case NFS3_OK:
+    COMMIT3resok   resok;
+default:
+    COMMIT3resfail resfail;
+};
+*/
+
+pub async fn nfsproc3_commit(
+    xid: u32,
+    input: &mut impl Read,
+    output: &mut impl Write,
+    context: &RPCContext,
+) -> Result<(), anyhow::Error> {
+    // if we do not have write capabilities
+    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+        warn!("No write capabilities.");
+        make_success_reply(xid).serialize(output)?;
+        nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
+        return Ok(());
+    }
+
+    let mut args = COMMIT3args::default();
+    args.deserialize(input)?;
+    debug!("nfsproc3_commit({:?},{:?}) ", xid, args);
+
+    let id = context.vfs.fh_to_id(&args.file);
+    if let Err(stat) = id {
+        make_success_reply(xid).serialize(output)?;
+        stat.serialize(output)?;
+        nfs::wcc_data::default().serialize(output)?;
+        return Ok(());
+    }
+    let id = id.unwrap();
+
+    // get the object attributes before the commit
+    let pre_obj_attr = match context.vfs.getattr(id).await {
+        Ok(v) => {
+            let wccattr = nfs::wcc_attr {
+                size: v.size,
+                mtime: v.mtime,
+                ctime: v.ctime,
+            };
+            nfs::pre_op_attr::attributes(wccattr)
+        }
+        Err(_) => nfs::pre_op_attr::Void,
+    };
+
+    match context.vfs.commit(id, args.offset, args.count).await {
+        Ok(fattr) => {
+            debug!("commit success {:?} --> {:?}", xid, fattr);
+            let res = COMMIT3resok {
+                file_wcc: nfs::wcc_data {
+                    before: pre_obj_attr,
+                    after: nfs::post_op_attr::attributes(fattr),
+                },
+                verf: context.vfs.serverid(),
+            };
+            make_success_reply(xid).serialize(output)?;
+            nfs::nfsstat3::NFS3_OK.serialize(output)?;
+            res.serialize(output)?;
+        }
+        Err(stat) => {
+            error!("commit error {:?} --> {:?}", xid, stat);
+            make_success_reply(xid).serialize(output)?;
+            stat.serialize(output)?;
+            nfs::wcc_data {
+                before: pre_obj_attr,
+                after: nfs::post_op_attr::Void,
+            }.serialize(output)?;
         }
     }
     Ok(())

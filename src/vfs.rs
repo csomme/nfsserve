@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use std::cmp::Ordering;
 use std::sync::Once;
 use std::time::SystemTime;
+use crate::nfs_handlers::stable_how;
+
 #[derive(Default, Debug)]
 pub struct DirEntrySimple {
     pub fileid: fileid3,
@@ -213,6 +215,25 @@ pub trait NFSFileSystem: Sync {
 
     /// Reads a symlink
     async fn readlink(&self, id: fileid3) -> Result<nfspath3, nfsstat3>;
+
+    async fn write_with_stability(
+        &self,
+        id: nfs::fileid3,
+        offset: nfs::offset3,
+        data: &[u8],
+        stability: stable_how,
+    ) -> Result<(nfs::fattr3, stable_how), nfs::nfsstat3> {
+        Ok((self.write(id, offset, data).await?, stable_how::FILE_SYNC))
+    }
+
+    async fn commit(
+        &self,
+        id: nfs::fileid3,
+        offset: nfs::offset3,
+        count: nfs::count3,
+    ) -> Result<nfs::fattr3, nfs::nfsstat3> {
+        Err(nfsstat3::NFS3ERR_NOTSUPP)
+    }
 
     /// Get static file system Information
     async fn fsinfo(
