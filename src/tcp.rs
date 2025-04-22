@@ -32,9 +32,9 @@ pub fn generate_host_ip(hostnum: u16) -> String {
 }
 
 /// processes an established socket
-async fn process_socket(
+async fn process_socket<VFS: NFSFileSystem + Clone + 'static>(
     mut socket: tokio::net::TcpStream,
-    context: RPCContext,
+    context: RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> {
     let (mut message_handler, mut socksend, mut msgrecvchan) = SocketMessageHandler::new(&context);
     let _ = socket.set_nodelay(true);
@@ -191,7 +191,7 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcpListener<T> {
 }
 
 #[async_trait]
-impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcp for NFSTcpListener<T> {
+impl<T: NFSFileSystem + Send + Sync + Clone + 'static> NFSTcp for NFSTcpListener<T> {
     /// Gets the true listening port. Useful if the bound port number is 0
     fn get_listen_port(&self) -> u16 {
         let addr = self.listener.local_addr().unwrap();

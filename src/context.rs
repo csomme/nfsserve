@@ -5,17 +5,17 @@ use tokio::sync::mpsc;
 use crate::transaction_tracker::TransactionTracker;
 
 #[derive(Clone)]
-pub struct RPCContext {
+pub struct RPCContext<VFS: NFSFileSystem> {
     pub local_port: u16,
     pub client_addr: String,
     pub auth: crate::rpc::auth_unix,
-    pub vfs: Arc<dyn NFSFileSystem + Send + Sync>,
+    pub vfs: Arc<VFS>,
     pub mount_signal: Option<mpsc::Sender<bool>>,
     pub export_name: Arc<String>,
     pub transaction_tracker: Arc<TransactionTracker>,
 }
 
-impl fmt::Debug for RPCContext {
+impl<VFS: NFSFileSystem> fmt::Debug for RPCContext<VFS> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("RPCContext")
             .field("local_port", &self.local_port)

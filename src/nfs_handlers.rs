@@ -3,13 +3,14 @@
 use crate::context::RPCContext;
 use crate::nfs;
 use crate::rpc::*;
-use crate::vfs::VFSCapabilities;
+use crate::vfs::{NFSFileSystem, VFSCapabilities};
 use crate::xdr::*;
 use byteorder::{ReadBytesExt, WriteBytesExt};
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::cast::FromPrimitive;
 use std::io::{Read, Write};
 use tracing::{debug, error, trace, warn};
+use crate::nfs::nfs_fh3;
 /*
 program NFS_PROGRAM {
  version NFS_V3 {
@@ -113,13 +114,13 @@ enum NFSProgram {
     INVALID = 22,
 }
 
-pub async fn handle_nfs(
+pub async fn handle_nfs<VFS>(
     xid: u32,
     call: call_body,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     if call.vers != nfs::VERSION {
         warn!(
             "Invalid NFS Version number {} != {}",
@@ -193,25 +194,24 @@ union GETATTR3res switch (nfsstat3 status) {
   void;
 };
  */
-pub async fn nfsproc3_getattr(
+pub async fn nfsproc3_getattr<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut handle = nfs::nfs_fh3::default();
     handle.deserialize(input)?;
     debug!("nfsproc3_getattr({:?},{:?}) ", xid, handle);
 
-    let id = context.vfs.fh_to_id(&handle);
-    // fail if unable to convert file handle
-    if let Err(stat) = id {
+    let file_handle = VFS::FileHandle::try_from(&handle);
+    if let Err(stat) = file_handle {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
         return Ok(());
     }
-    let id = id.unwrap();
-    match context.vfs.getattr(id).await {
+    let file_handle = file_handle.unwrap();
+    match context.vfs.getattr(&file_handle).await {
         Ok(fh) => {
             debug!(" {:?} --> {:?}", xid, fh);
             make_success_reply(xid).serialize(output)?;
@@ -252,33 +252,33 @@ pub async fn nfsproc3_getattr(
  };
 *
 */
-pub async fn nfsproc3_lookup(
+pub async fn nfsproc3_lookup<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut dirops = nfs::diropargs3::default();
     dirops.deserialize(input)?;
     debug!("nfsproc3_lookup({:?},{:?}) ", xid, dirops);
 
-    let dirid = context.vfs.fh_to_id(&dirops.dir);
+    let dir_handle = VFS::FileHandle::try_from(&dirops.dir);
     // fail if unable to convert file handle
-    if let Err(stat) = dirid {
+    if let Err(stat) = &dir_handle {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
         nfs::post_op_attr::Void.serialize(output)?;
         return Ok(());
     }
-    let dirid = dirid.unwrap();
+    let dir_handle = dir_handle.unwrap();
 
-    let dir_attr = match context.vfs.getattr(dirid).await {
+    let dir_attr = match context.vfs.getattr(&dir_handle).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
-    match context.vfs.lookup(dirid, &dirops.name).await {
-        Ok(fid) => {
-            let obj_attr = match context.vfs.getattr(fid).await {
+    match context.vfs.lookup(&dir_handle, &dirops.name).await {
+        Ok(file_handle) => {
+            let obj_attr = match context.vfs.getattr(&file_handle).await {
                 Ok(v) => nfs::post_op_attr::attributes(v),
                 Err(_) => nfs::post_op_attr::Void,
             };
@@ -286,7 +286,8 @@ pub async fn nfsproc3_lookup(
             debug!("lookup success {:?} --> {:?}", xid, obj_attr);
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;
-            context.vfs.id_to_fh(fid).serialize(output)?;
+            let handle_nfs: nfs::nfs_fh3 = file_handle.clone().into();
+            handle_nfs.serialize(output)?;
             obj_attr.serialize(output)?;
             dir_attr.serialize(output)?;
         }
@@ -345,30 +346,30 @@ default:
    READ3resfail resfail;
 };
  */
-pub async fn nfsproc3_read(
+pub async fn nfsproc3_read<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut args = READ3args::default();
     args.deserialize(input)?;
     debug!("nfsproc3_read({:?},{:?}) ", xid, args);
 
-    let id = context.vfs.fh_to_id(&args.file);
-    if let Err(stat) = id {
+    let handle = VFS::FileHandle::try_from(&args.file);
+    if let Err(stat) = handle {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
         nfs::post_op_attr::Void.serialize(output)?;
         return Ok(());
     }
-    let id = id.unwrap();
+    let handle = handle.unwrap();
 
-    let obj_attr = match context.vfs.getattr(id).await {
+    let obj_attr = match context.vfs.getattr(&handle).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
-    match context.vfs.read(id, args.offset, args.count).await {
+    match context.vfs.read(&handle, args.offset, args.count).await {
         Ok((bytes, eof)) => {
             let res = READ3resok {
                 file_attributes: obj_attr,
@@ -429,17 +430,17 @@ pub async fn nfsproc3_read(
   };
 */
 
-pub async fn nfsproc3_fsinfo(
+pub async fn nfsproc3_fsinfo<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut handle = nfs::nfs_fh3::default();
     handle.deserialize(input)?;
     debug!("nfsproc3_fsinfo({:?},{:?}) ", xid, handle);
 
-    let id = context.vfs.fh_to_id(&handle);
+    let id = VFS::FileHandle::try_from(&handle);
     // fail if unable to convert file handle
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
@@ -449,7 +450,7 @@ pub async fn nfsproc3_fsinfo(
     }
     let id = id.unwrap();
 
-    match context.vfs.fsinfo(id).await {
+    match context.vfs.fsinfo(&id).await {
         Ok(fsinfo) => {
             debug!(" {:?} --> {:?}", xid, fsinfo);
             make_success_reply(xid).serialize(output)?;
@@ -498,19 +499,19 @@ const ACCESS3_EXECUTE: u32 = 0x0020;
  };
 */
 
-pub async fn nfsproc3_access(
+pub async fn nfsproc3_access<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut handle = nfs::nfs_fh3::default();
     handle.deserialize(input)?;
     let mut access: u32 = 0;
     access.deserialize(input)?;
     debug!("nfsproc3_access({:?},{:?},{:?})", xid, handle, access);
 
-    let id = context.vfs.fh_to_id(&handle);
+    let id = VFS::FileHandle::try_from(&handle);
     // fail if unable to convert file handle
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
@@ -520,7 +521,7 @@ pub async fn nfsproc3_access(
     }
     let id = id.unwrap();
 
-    let obj_attr = match context.vfs.getattr(id).await {
+    let obj_attr = match context.vfs.getattr(&id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -586,17 +587,17 @@ XDRStruct!(
           PATHCONF3resfail resfail;
      };
 */
-pub async fn nfsproc3_pathconf(
+pub async fn nfsproc3_pathconf<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut handle = nfs::nfs_fh3::default();
     handle.deserialize(input)?;
     debug!("nfsproc3_pathconf({:?},{:?})", xid, handle);
 
-    let id = context.vfs.fh_to_id(&handle);
+    let id = VFS::FileHandle::try_from(&handle);
     // fail if unable to convert file handle
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
@@ -606,7 +607,7 @@ pub async fn nfsproc3_pathconf(
     }
     let id = id.unwrap();
 
-    let obj_attr = match context.vfs.getattr(id).await {
+    let obj_attr = match context.vfs.getattr(&id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -681,16 +682,16 @@ XDRStruct!(
 
 */
 
-pub async fn nfsproc3_fsstat(
+pub async fn nfsproc3_fsstat<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut handle = nfs::nfs_fh3::default();
     handle.deserialize(input)?;
     debug!("nfsproc3_fsstat({:?},{:?}) ", xid, handle);
-    let id = context.vfs.fh_to_id(&handle);
+    let id = VFS::FileHandle::try_from(&handle);
     // fail if unable to convert file handle
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
@@ -700,7 +701,7 @@ pub async fn nfsproc3_fsstat(
     }
     let id = id.unwrap();
 
-    let obj_attr = match context.vfs.getattr(id).await {
+    let obj_attr = match context.vfs.getattr(&id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -802,26 +803,26 @@ XDRStruct!(
            post_op_attr dir_attributes;
       };
 */
-pub async fn nfsproc3_readdirplus(
+pub async fn nfsproc3_readdirplus<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut args = READDIRPLUS3args::default();
     args.deserialize(input)?;
     debug!("nfsproc3_readdirplus({:?},{:?}) ", xid, args);
 
-    let dirid = context.vfs.fh_to_id(&args.dir);
+    let dir_handle = VFS::FileHandle::try_from(&args.dir);
     // fail if unable to convert file handle
-    if let Err(stat) = dirid {
+    if let Err(stat) = dir_handle {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
         nfs::post_op_attr::Void.serialize(output)?;
         return Ok(());
     }
-    let dirid = dirid.unwrap();
-    let dir_attr_maybe = context.vfs.getattr(dirid).await;
+    let dir_handle = dir_handle.unwrap();
+    let dir_attr_maybe = context.vfs.getattr(&dir_handle).await;
 
     let dir_attr = match dir_attr_maybe {
         Ok(v) => nfs::post_op_attr::attributes(v),
@@ -909,7 +910,7 @@ pub async fn nfsproc3_readdirplus(
     let mut ctr = 0;
     match context
         .vfs
-        .readdir(dirid, args.cookie, estimated_max_results as usize)
+        .readdir(&dir_handle, args.cookie, estimated_max_results as usize)
         .await
     {
         Ok(result) => {
@@ -927,14 +928,14 @@ pub async fn nfsproc3_readdirplus(
             dirversion.serialize(&mut counting_output)?;
             for entry in result.entries {
                 let obj_attr = entry.attr;
-                let handle = nfs::post_op_fh3::handle(context.vfs.id_to_fh(entry.fileid));
 
+                // let handle = nfs::post_op_fh3::handle(entry.into());
                 let entry = entryplus3 {
-                    fileid: entry.fileid,
+                    fileid: entry.handle.clone().into(),
                     name: entry.name,
-                    cookie: entry.fileid,
+                    cookie: entry.handle.clone().into(),
                     name_attributes: nfs::post_op_attr::attributes(obj_attr),
-                    name_handle: handle,
+                    name_handle: nfs::post_op_fh3::handle(entry.handle.into()),
                 };
                 // write the entry into a buffer first
                 let mut write_buf: Vec<u8> = Vec::new();
@@ -980,8 +981,8 @@ pub async fn nfsproc3_readdirplus(
                 false.serialize(&mut counting_output)?;
             }
             debug!(
-                "readir {}, has_version {},  start at {}, flushing {} entries, complete {}",
-                dirid, has_version, args.cookie, ctr, all_entries_written
+                "readir {:?}, has_version {},  start at {}, flushing {} entries, complete {}",
+                &dir_handle, has_version, args.cookie, ctr, all_entries_written
             );
         }
         Err(stat) => {
@@ -994,17 +995,17 @@ pub async fn nfsproc3_readdirplus(
     Ok(())
 }
 
-pub async fn nfsproc3_readdir(
+pub async fn nfsproc3_readdir<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut args = READDIR3args::default();
     args.deserialize(input)?;
     debug!("nfsproc3_readdirplus({:?},{:?}) ", xid, args);
 
-    let dirid = context.vfs.fh_to_id(&args.dir);
+    let dirid = VFS::FileHandle::try_from(&args.dir);
     // fail if unable to convert file handle
     if let Err(stat) = dirid {
         make_success_reply(xid).serialize(output)?;
@@ -1013,7 +1014,7 @@ pub async fn nfsproc3_readdir(
         return Ok(());
     }
     let dirid = dirid.unwrap();
-    let dir_attr_maybe = context.vfs.getattr(dirid).await;
+    let dir_attr_maybe = context.vfs.getattr(&dirid).await;
 
     let dir_attr = match dir_attr_maybe {
         Ok(v) => nfs::post_op_attr::attributes(v),
@@ -1037,7 +1038,7 @@ pub async fn nfsproc3_readdir(
     let mut ctr = 0;
     match context
         .vfs
-        .readdir_simple(dirid, estimated_max_results as usize)
+        .readdir_simple(&dirid, estimated_max_results as usize)
         .await
     {
         Ok(result) => {
@@ -1100,7 +1101,7 @@ pub async fn nfsproc3_readdir(
                 false.serialize(&mut counting_output)?;
             }
             debug!(
-                "readir {}, has_version {},  start at {}, flushing {} entries, complete {}",
+                "readir {:?}, has_version {},  start at {}, flushing {} entries, complete {}",
                 dirid, has_version, args.cookie, ctr, all_entries_written
             );
         }
@@ -1182,12 +1183,12 @@ union WRITE3res switch (nfsstat3 status) {
 };
 
  */
-pub async fn nfsproc3_write(
+pub async fn nfsproc3_write<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -1206,7 +1207,7 @@ pub async fn nfsproc3_write(
         return Ok(());
     }
 
-    let id = context.vfs.fh_to_id(&args.file);
+    let id = VFS::FileHandle::try_from(&args.file);
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
@@ -1216,7 +1217,7 @@ pub async fn nfsproc3_write(
     let id = id.unwrap();
 
     // get the object attributes before the write
-    let pre_obj_attr = match context.vfs.getattr(id).await {
+    let pre_obj_attr = match context.vfs.getattr(&id).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1232,7 +1233,7 @@ pub async fn nfsproc3_write(
     let stable_how = stable_how::from_u32(args.stable).unwrap_or(stable_how::UNSTABLE);
 
     // Call write with the stability level
-    match context.vfs.write_with_stability(id, args.offset, &args.data, stable_how).await {
+    match context.vfs.write_with_stability(&id, args.offset, &args.data, stable_how).await {
         Ok((fattr, committed)) => {
             debug!("write success {:?} --> {:?}, committed: {:?}", xid, fattr, committed);
             let res = WRITE3resok {
@@ -1301,12 +1302,12 @@ default:
 };
 */
 
-pub async fn nfsproc3_commit(
+pub async fn nfsproc3_commit<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -1320,7 +1321,7 @@ pub async fn nfsproc3_commit(
     args.deserialize(input)?;
     debug!("nfsproc3_commit({:?},{:?}) ", xid, args);
 
-    let id = context.vfs.fh_to_id(&args.file);
+    let id = VFS::FileHandle::try_from(&args.file);
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
         stat.serialize(output)?;
@@ -1330,7 +1331,7 @@ pub async fn nfsproc3_commit(
     let id = id.unwrap();
 
     // get the object attributes before the commit
-    let pre_obj_attr = match context.vfs.getattr(id).await {
+    let pre_obj_attr = match context.vfs.getattr(&id).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1342,7 +1343,7 @@ pub async fn nfsproc3_commit(
         Err(_) => nfs::pre_op_attr::Void,
     };
 
-    match context.vfs.commit(id, args.offset, args.count).await {
+    match context.vfs.commit(&id, args.offset, args.count).await {
         Ok(fattr) => {
             debug!("commit success {:?} --> {:?}", xid, fattr);
             let res = COMMIT3resok {
@@ -1419,12 +1420,12 @@ CREATE3res NFSPROC3_CREATE(CREATE3args) = 8;
       };
 */
 
-pub async fn nfsproc3_create(
+pub async fn nfsproc3_create<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -1443,7 +1444,7 @@ pub async fn nfsproc3_create(
 
     // find the directory we are supposed to create the
     // new file in
-    let dirid = context.vfs.fh_to_id(&dirops.dir);
+    let dirid = VFS::FileHandle::try_from(&dirops.dir);
     if let Err(stat) = dirid {
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
@@ -1456,7 +1457,7 @@ pub async fn nfsproc3_create(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1483,11 +1484,11 @@ pub async fn nfsproc3_create(
         createmode3::GUARDED => {
             target_attributes.deserialize(input)?;
             debug!("create guarded {:?}", target_attributes);
-            if context.vfs.lookup(dirid, &dirops.name).await.is_ok() {
+            if context.vfs.lookup(&dirid, &dirops.name).await.is_ok() {
                 // file exists. Fail with NFS3ERR_EXIST.
                 // Re-read dir attributes
                 // for post op attr
-                let post_dir_attr = match context.vfs.getattr(dirid).await {
+                let post_dir_attr = match context.vfs.getattr(&dirid).await {
                     Ok(v) => nfs::post_op_attr::attributes(v),
                     Err(_) => nfs::post_op_attr::Void,
                 };
@@ -1507,30 +1508,30 @@ pub async fn nfsproc3_create(
         }
     }
 
-    let fid: Result<nfs::fileid3, nfs::nfsstat3>;
+    let fid: Result<VFS::FileHandle, nfs::nfsstat3>;
     let postopattr: nfs::post_op_attr;
     // fill in the fid and post op attr here
     if matches!(createhow, createmode3::EXCLUSIVE) {
         // the API for exclusive is very slightly different
         // We are not returning a post op attribute
-        fid = context.vfs.create_exclusive(dirid, &dirops.name).await;
+        fid = context.vfs.create_exclusive(&dirid, &dirops.name).await;
         postopattr = nfs::post_op_attr::Void;
     } else {
         // create!
         let res = context
             .vfs
-            .create(dirid, &dirops.name, target_attributes)
+            .create(&dirid, &dirops.name, target_attributes)
             .await;
-        fid = res.map(|x| x.0);
-        postopattr = if let Ok((_, fattr)) = res {
-            nfs::post_op_attr::attributes(fattr)
-        } else {
-            nfs::post_op_attr::Void
-        };
+
+        (fid, postopattr) = res.map_or_else(
+            |err| (Err(err), nfs::post_op_attr::Void),
+            |(fid, fattr)|
+                (Ok(fid), nfs::post_op_attr::attributes(fattr)),
+        )
     }
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -1545,8 +1546,7 @@ pub async fn nfsproc3_create(
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;
             // serialize CREATE3resok
-            let fh = context.vfs.id_to_fh(fid);
-            nfs::post_op_fh3::handle(fh).serialize(output)?;
+            nfs::post_op_fh3::handle(fid.clone().into()).serialize(output)?;
             postopattr.serialize(output)?;
             wcc_res.serialize(output)?;
         }
@@ -1612,12 +1612,12 @@ XDRStruct!(SETATTR3args, object, new_attribute, guard);
       };
 */
 
-pub async fn nfsproc3_setattr(
+pub async fn nfsproc3_setattr<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
@@ -1629,7 +1629,7 @@ pub async fn nfsproc3_setattr(
     args.deserialize(input)?;
     debug!("nfsproc3_setattr({:?},{:?}) ", xid, args);
 
-    let id = context.vfs.fh_to_id(&args.object);
+    let id = VFS::FileHandle::try_from(&args.object);
     // fail if unable to convert file handle
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
@@ -1640,7 +1640,7 @@ pub async fn nfsproc3_setattr(
 
     let ctime;
 
-    let pre_op_attr = match context.vfs.getattr(id).await {
+    let pre_op_attr = match context.vfs.getattr(&id).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1669,7 +1669,7 @@ pub async fn nfsproc3_setattr(
         }
     }
 
-    match context.vfs.setattr(id, args.new_attribute).await {
+    match context.vfs.setattr(&id, args.new_attribute).await {
         Ok(post_op_attr) => {
             debug!(" setattr success {:?} --> {:?}", xid, post_op_attr);
             let wcc_res = nfs::wcc_data {
@@ -1715,12 +1715,12 @@ pub async fn nfsproc3_setattr(
       RMDIR is basically identically structured
 */
 
-pub async fn nfsproc3_remove(
+pub async fn nfsproc3_remove<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -1736,7 +1736,7 @@ pub async fn nfsproc3_remove(
     debug!("nfsproc3_remove({:?}, {:?}) ", xid, dirops);
 
     // find the directory with the file
-    let dirid = context.vfs.fh_to_id(&dirops.dir);
+    let dirid = VFS::FileHandle::try_from(&dirops.dir);
     if let Err(stat) = dirid {
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
@@ -1748,7 +1748,7 @@ pub async fn nfsproc3_remove(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1767,10 +1767,10 @@ pub async fn nfsproc3_remove(
     };
 
     // delete!
-    let res = context.vfs.remove(dirid, &dirops.name).await;
+    let res = context.vfs.remove(&dirid, &dirops.name).await;
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -1824,12 +1824,12 @@ pub async fn nfsproc3_remove(
       };
 */
 
-pub async fn nfsproc3_rename(
+pub async fn nfsproc3_rename<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -1850,7 +1850,7 @@ pub async fn nfsproc3_rename(
     );
 
     // find the from directory
-    let from_dirid = context.vfs.fh_to_id(&fromdirops.dir);
+    let from_dirid = VFS::FileHandle::try_from(&fromdirops.dir);
     if let Err(stat) = from_dirid {
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
@@ -1861,7 +1861,7 @@ pub async fn nfsproc3_rename(
     }
 
     // find the to directory
-    let to_dirid = context.vfs.fh_to_id(&todirops.dir);
+    let to_dirid = VFS::FileHandle::try_from(&todirops.dir);
     if let Err(stat) = to_dirid {
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
@@ -1876,7 +1876,7 @@ pub async fn nfsproc3_rename(
     let to_dirid = to_dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_from_dir_attr = match context.vfs.getattr(from_dirid).await {
+    let pre_from_dir_attr = match context.vfs.getattr(&from_dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1895,7 +1895,7 @@ pub async fn nfsproc3_rename(
     };
 
     // get the object attributes before the write
-    let pre_to_dir_attr = match context.vfs.getattr(to_dirid).await {
+    let pre_to_dir_attr = match context.vfs.getattr(&to_dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1916,15 +1916,15 @@ pub async fn nfsproc3_rename(
     // rename!
     let res = context
         .vfs
-        .rename(from_dirid, &fromdirops.name, to_dirid, &todirops.name)
+        .rename(&from_dirid, &fromdirops.name, &to_dirid, &todirops.name)
         .await;
 
     // Re-read dir attributes for post op attr
-    let post_from_dir_attr = match context.vfs.getattr(from_dirid).await {
+    let post_from_dir_attr = match context.vfs.getattr(&from_dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
-    let post_to_dir_attr = match context.vfs.getattr(to_dirid).await {
+    let post_to_dir_attr = match context.vfs.getattr(&to_dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -1994,12 +1994,12 @@ struct MKDIR3args {
 }
 XDRStruct!(MKDIR3args, dirops, attributes);
 
-pub async fn nfsproc3_mkdir(
+pub async fn nfsproc3_mkdir<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -2015,7 +2015,7 @@ pub async fn nfsproc3_mkdir(
 
     // find the directory we are supposed to create the
     // new file in
-    let dirid = context.vfs.fh_to_id(&args.dirops.dir);
+    let dirid = VFS::FileHandle::try_from(&args.dirops.dir);
     if let Err(stat) = dirid {
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
@@ -2028,7 +2028,7 @@ pub async fn nfsproc3_mkdir(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -2046,10 +2046,10 @@ pub async fn nfsproc3_mkdir(
         }
     };
 
-    let res = context.vfs.mkdir(dirid, &args.dirops.name).await;
+    let res = context.vfs.mkdir(&dirid, &args.dirops.name).await;
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -2064,8 +2064,7 @@ pub async fn nfsproc3_mkdir(
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;
             // serialize CREATE3resok
-            let fh = context.vfs.id_to_fh(fid);
-            nfs::post_op_fh3::handle(fh).serialize(output)?;
+            nfs::post_op_fh3::handle(fid.into()).serialize(output)?;
             nfs::post_op_attr::attributes(fattr).serialize(output)?;
             wcc_res.serialize(output)?;
         }
@@ -2120,12 +2119,12 @@ struct SYMLINK3args {
 }
 XDRStruct!(SYMLINK3args, dirops, symlink);
 
-pub async fn nfsproc3_symlink(
+pub async fn nfsproc3_symlink<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
     if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
@@ -2141,7 +2140,7 @@ pub async fn nfsproc3_symlink(
 
     // find the directory we are supposed to create the
     // new file in
-    let dirid = context.vfs.fh_to_id(&args.dirops.dir);
+    let dirid = VFS::FileHandle::try_from(&args.dirops.dir);
     if let Err(stat) = dirid {
         // directory does not exist
         make_success_reply(xid).serialize(output)?;
@@ -2154,7 +2153,7 @@ pub async fn nfsproc3_symlink(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -2175,7 +2174,7 @@ pub async fn nfsproc3_symlink(
     let res = context
         .vfs
         .symlink(
-            dirid,
+            &dirid,
             &args.dirops.name,
             &args.symlink.symlink_data,
             &args.symlink.symlink_attributes,
@@ -2183,7 +2182,7 @@ pub async fn nfsproc3_symlink(
         .await;
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -2198,8 +2197,7 @@ pub async fn nfsproc3_symlink(
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;
             // serialize CREATE3resok
-            let fh = context.vfs.id_to_fh(fid);
-            nfs::post_op_fh3::handle(fh).serialize(output)?;
+            nfs::post_op_fh3::handle(fid.into()).serialize(output)?;
             nfs::post_op_attr::attributes(fattr).serialize(output)?;
             wcc_res.serialize(output)?;
         }
@@ -2239,17 +2237,17 @@ pub async fn nfsproc3_symlink(
       READLINK3resfail resfail;
  };
 */
-pub async fn nfsproc3_readlink(
+pub async fn nfsproc3_readlink<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut handle = nfs::nfs_fh3::default();
     handle.deserialize(input)?;
     debug!("nfsproc3_readlink({:?},{:?}) ", xid, handle);
 
-    let id = context.vfs.fh_to_id(&handle);
+    let id = VFS::FileHandle::try_from(&handle);
     // fail if unable to convert file handle
     if let Err(stat) = id {
         make_success_reply(xid).serialize(output)?;
@@ -2258,7 +2256,7 @@ pub async fn nfsproc3_readlink(
     }
     let id = id.unwrap();
     // if the id does not exist, we fail
-    let symlink_attr = match context.vfs.getattr(id).await {
+    let symlink_attr = match context.vfs.getattr(&id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(stat) => {
             make_success_reply(xid).serialize(output)?;
@@ -2267,7 +2265,7 @@ pub async fn nfsproc3_readlink(
             return Ok(());
         }
     };
-    match context.vfs.readlink(id).await {
+    match context.vfs.readlink(&id).await {
         Ok(path) => {
             debug!(" {:?} --> {:?}", xid, path);
             make_success_reply(xid).serialize(output)?;

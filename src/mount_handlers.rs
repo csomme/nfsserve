@@ -1,12 +1,12 @@
 use crate::context::RPCContext;
 use crate::mount::*;
 use crate::rpc::*;
+use crate::vfs::NFSFileSystem;
 use crate::xdr::*;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::cast::{FromPrimitive, ToPrimitive};
 use std::io::{Read, Write};
 use tracing::debug;
-
 /*
 From RFC 1813 Appendix I
 program MOUNT_PROGRAM {
@@ -34,13 +34,16 @@ enum MountProgram {
     INVALID,
 }
 
-pub async fn handle_mount(
+pub async fn handle_mount<VFS>(
     xid: u32,
     call: call_body,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     let prog = MountProgram::from_u32(call.proc).unwrap_or(MountProgram::INVALID);
 
     match prog {
@@ -79,12 +82,15 @@ struct mountres3_ok {
 }
 XDRStruct!(mountres3_ok, fhandle, auth_flavors);
 
-pub async fn mountproc3_mnt(
+pub async fn mountproc3_mnt<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     let mut path = dirpath::new();
     path.deserialize(input)?;
     let utf8path = std::str::from_utf8(&path).unwrap_or_default();
@@ -106,9 +112,9 @@ pub async fn mountproc3_mnt(
         mountstat3::MNT3ERR_NOENT.serialize(output)?;
         return Ok(());
     };
-    if let Ok(fileid) = context.vfs.path_to_id(&path).await {
+    if let Ok(fileid) = context.vfs.path_to_handle(&path).await {
         let response = mountres3_ok {
-            fhandle: context.vfs.id_to_fh(fileid).data,
+            fhandle: fileid.into(),
             auth_flavors: vec![
                 auth_flavor::AUTH_NULL.to_u32().unwrap(),
                 auth_flavor::AUTH_UNIX.to_u32().unwrap(),
@@ -163,12 +169,15 @@ IMPLEMENTATION
   clients.
  */
 
-pub fn mountproc3_export(
+pub fn mountproc3_export<VFS>(
     xid: u32,
     _: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     debug!("mountproc3_export({:?}) ", xid);
     make_success_reply(xid).serialize(output)?;
     true.serialize(output)?;
@@ -181,12 +190,12 @@ pub fn mountproc3_export(
     Ok(())
 }
 
-pub async fn mountproc3_umnt(
+pub async fn mountproc3_umnt<VFS>(
     xid: u32,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut path = dirpath::new();
     path.deserialize(input)?;
     let utf8path = std::str::from_utf8(&path).unwrap_or_default();
@@ -199,12 +208,12 @@ pub async fn mountproc3_umnt(
     Ok(())
 }
 
-pub async fn mountproc3_umnt_all(
+pub async fn mountproc3_umnt_all<VFS>(
     xid: u32,
     _input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     debug!("mountproc3_umnt_all({:?}) ", xid);
     if let Some(ref chan) = context.mount_signal {
         let _ = chan.send(false).await;

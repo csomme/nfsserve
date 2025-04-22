@@ -6,7 +6,7 @@ mod rpcwire;
 mod write_counter;
 pub mod xdr;
 
-mod mount;
+pub mod mount;
 mod mount_handlers;
 
 mod portmap;
