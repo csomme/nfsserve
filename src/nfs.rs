@@ -560,6 +560,18 @@ pub struct symlinkdata3 {
 }
 XDRStruct!(symlinkdata3, symlink_attributes, symlink_data);
 
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, Debug, Default, FromPrimitive, ToPrimitive)]
+#[repr(u32)]
+pub enum stable_how {
+    #[default]
+    UNSTABLE = 0,
+    DATA_SYNC = 1,
+    FILE_SYNC = 2,
+}
+XDREnumSerde!(stable_how);
+
+
 /// We define the root handle here
 pub fn get_root_mount_handle() -> Vec<u8> {
     vec![0]

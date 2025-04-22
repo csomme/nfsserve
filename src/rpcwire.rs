@@ -19,7 +19,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
-
+use crate::vfs::NFSFileSystem;
 // Information from RFC 5531
 // https://datatracker.ietf.org/doc/html/rfc5531
 
@@ -27,11 +27,11 @@ const NFS_ACL_PROGRAM: u32 = 100227;
 const NFS_ID_MAP_PROGRAM: u32 = 100270;
 const NFS_METADATA_PROGRAM: u32 = 200024;
 
-async fn handle_rpc(
+async fn handle_rpc<VFS>(
     input: &mut impl Read,
     output: &mut impl Write,
-    mut context: RPCContext,
-) -> Result<bool, anyhow::Error> {
+    mut context: RPCContext<VFS>,
+) -> Result<bool, anyhow::Error> where VFS: NFSFileSystem {
     let mut recv = rpc_msg::default();
     recv.deserialize(input)?;
     let xid = recv.xid;
@@ -146,17 +146,17 @@ pub type SocketMessageType = Result<Vec<u8>, anyhow::Error>;
 /// subtasks to handle each message. replies are queued into the
 /// reply_send_channel.
 #[derive(Debug)]
-pub struct SocketMessageHandler {
+pub struct SocketMessageHandler<VFS: NFSFileSystem> {
     cur_fragment: Vec<u8>,
     socket_receive_channel: DuplexStream,
     reply_send_channel: mpsc::UnboundedSender<SocketMessageType>,
-    context: RPCContext,
+    context: RPCContext<VFS>,
 }
 
-impl SocketMessageHandler {
+impl<VFS: NFSFileSystem + Clone + 'static> SocketMessageHandler<VFS> {
     /// Creates a new SocketMessageHandler with the receiver for queued message replies
     pub fn new(
-        context: &RPCContext,
+        context: &RPCContext<VFS>,
     ) -> (
         Self,
         DuplexStream,

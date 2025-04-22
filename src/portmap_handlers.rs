@@ -6,7 +6,7 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::cast::FromPrimitive;
 use std::io::{Read, Write};
 use tracing::{debug, error};
-
+use crate::vfs::NFSFileSystem;
 /*
  From RFC 1057 Appendix A
 
@@ -35,13 +35,13 @@ enum PortmapProgram {
     INVALID,
 }
 
-pub fn handle_portmap(
+pub fn handle_portmap<VFS>(
     xid: u32,
     call: call_body,
     input: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     if call.vers != portmap::VERSION {
         error!(
             "Invalid Portmap Version number {} != {}",
@@ -79,12 +79,12 @@ pub fn pmapproc_null(
 /*
  * We fake a portmapper here. And always direct back to the same host port
  */
-pub fn pmapproc_getport(
+pub fn pmapproc_getport<VFS>(
     xid: u32,
     read: &mut impl Read,
     output: &mut impl Write,
-    context: &RPCContext,
-) -> Result<(), anyhow::Error> {
+    context: &RPCContext<VFS>,
+) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     let mut mapping = portmap::mapping::default();
     mapping.deserialize(read)?;
     debug!("pmapproc_getport({:?}, {:?}) ", xid, mapping);
