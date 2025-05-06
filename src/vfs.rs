@@ -7,7 +7,6 @@ use std::time::SystemTime;
 use std::fmt::{Debug, Display};
 use std::convert::TryFrom;
 use crate::mount::fhandle3;
-use crate::nfs_handlers::stable_how;
 
 #[derive(Default, Debug)]
 pub struct DirEntrySimple {

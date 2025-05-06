@@ -10,7 +10,7 @@ use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::cast::FromPrimitive;
 use std::io::{Read, Write};
 use tracing::{debug, error, trace, warn};
-use crate::nfs::nfs_fh3;
+use crate::nfs::{nfs_fh3, stable_how};
 /*
 program NFS_PROGRAM {
  version NFS_V3 {
@@ -1114,17 +1114,6 @@ pub async fn nfsproc3_readdir<VFS>(
     };
     Ok(())
 }
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug, Default, FromPrimitive, ToPrimitive)]
-#[repr(u32)]
-pub enum stable_how {
-    #[default]
-    UNSTABLE = 0,
-    DATA_SYNC = 1,
-    FILE_SYNC = 2,
-}
-XDREnumSerde!(stable_how);
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Default)]
