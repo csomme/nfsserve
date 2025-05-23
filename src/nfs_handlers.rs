@@ -211,7 +211,7 @@ pub async fn nfsproc3_getattr<VFS>(
         return Ok(());
     }
     let file_handle = file_handle.unwrap();
-    match context.vfs.getattr(&file_handle).await {
+    match context.vfs.getattr(&context.auth, &file_handle).await {
         Ok(fh) => {
             debug!(" {:?} --> {:?}", xid, fh);
             make_success_reply(xid).serialize(output)?;
@@ -272,13 +272,13 @@ pub async fn nfsproc3_lookup<VFS>(
     }
     let dir_handle = dir_handle.unwrap();
 
-    let dir_attr = match context.vfs.getattr(&dir_handle).await {
+    let dir_attr = match context.vfs.getattr(&context.auth, &dir_handle).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
-    match context.vfs.lookup(&dir_handle, &dirops.name).await {
+    match context.vfs.lookup(&context.auth, &dir_handle, &dirops.name).await {
         Ok(file_handle) => {
-            let obj_attr = match context.vfs.getattr(&file_handle).await {
+            let obj_attr = match context.vfs.getattr(&context.auth, &file_handle).await {
                 Ok(v) => nfs::post_op_attr::attributes(v),
                 Err(_) => nfs::post_op_attr::Void,
             };
@@ -365,11 +365,11 @@ pub async fn nfsproc3_read<VFS>(
     }
     let handle = handle.unwrap();
 
-    let obj_attr = match context.vfs.getattr(&handle).await {
+    let obj_attr = match context.vfs.getattr(&context.auth, &handle).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
-    match context.vfs.read(&handle, args.offset, args.count).await {
+    match context.vfs.read(&context.auth, &handle, args.offset, args.count).await {
         Ok((bytes, eof)) => {
             let res = READ3resok {
                 file_attributes: obj_attr,
@@ -450,7 +450,7 @@ pub async fn nfsproc3_fsinfo<VFS>(
     }
     let id = id.unwrap();
 
-    match context.vfs.fsinfo(&id).await {
+    match context.vfs.fsinfo(&context.auth, &id).await {
         Ok(fsinfo) => {
             debug!(" {:?} --> {:?}", xid, fsinfo);
             make_success_reply(xid).serialize(output)?;
@@ -521,12 +521,12 @@ pub async fn nfsproc3_access<VFS>(
     }
     let id = id.unwrap();
 
-    let obj_attr = match context.vfs.getattr(&id).await {
+    let obj_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
     // TODO better checks here
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         access &= ACCESS3_READ | ACCESS3_LOOKUP;
     }
     debug!(" {:?} ---> {:?}", xid, access);
@@ -607,7 +607,7 @@ pub async fn nfsproc3_pathconf<VFS>(
     }
     let id = id.unwrap();
 
-    let obj_attr = match context.vfs.getattr(&id).await {
+    let obj_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -701,7 +701,7 @@ pub async fn nfsproc3_fsstat<VFS>(
     }
     let id = id.unwrap();
 
-    let obj_attr = match context.vfs.getattr(&id).await {
+    let obj_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -822,7 +822,7 @@ pub async fn nfsproc3_readdirplus<VFS>(
         return Ok(());
     }
     let dir_handle = dir_handle.unwrap();
-    let dir_attr_maybe = context.vfs.getattr(&dir_handle).await;
+    let dir_attr_maybe = context.vfs.getattr(&context.auth, &dir_handle).await;
 
     let dir_attr = match dir_attr_maybe {
         Ok(v) => nfs::post_op_attr::attributes(v),
@@ -910,7 +910,7 @@ pub async fn nfsproc3_readdirplus<VFS>(
     let mut ctr = 0;
     match context
         .vfs
-        .readdir(&dir_handle, args.cookie, estimated_max_results as usize)
+        .readdir(&context.auth, &dir_handle, args.cookie, estimated_max_results as usize)
         .await
     {
         Ok(result) => {
@@ -1014,7 +1014,7 @@ pub async fn nfsproc3_readdir<VFS>(
         return Ok(());
     }
     let dirid = dirid.unwrap();
-    let dir_attr_maybe = context.vfs.getattr(&dirid).await;
+    let dir_attr_maybe = context.vfs.getattr(&context.auth, &dirid).await;
 
     let dir_attr = match dir_attr_maybe {
         Ok(v) => nfs::post_op_attr::attributes(v),
@@ -1038,7 +1038,7 @@ pub async fn nfsproc3_readdir<VFS>(
     let mut ctr = 0;
     match context
         .vfs
-        .readdir_simple(&dirid, estimated_max_results as usize)
+        .readdir_simple(&context.auth, &dirid, estimated_max_results as usize)
         .await
     {
         Ok(result) => {
@@ -1179,7 +1179,7 @@ pub async fn nfsproc3_write<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -1206,7 +1206,7 @@ pub async fn nfsproc3_write<VFS>(
     let id = id.unwrap();
 
     // get the object attributes before the write
-    let pre_obj_attr = match context.vfs.getattr(&id).await {
+    let pre_obj_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1222,7 +1222,7 @@ pub async fn nfsproc3_write<VFS>(
     let stable_how = stable_how::from_u32(args.stable).unwrap_or(stable_how::UNSTABLE);
 
     // Call write with the stability level
-    match context.vfs.write_with_stability(&id, args.offset, &args.data, stable_how).await {
+    match context.vfs.write_with_stability(&context.auth, &id, args.offset, &args.data, stable_how).await {
         Ok((fattr, committed)) => {
             debug!("write success {:?} --> {:?}, committed: {:?}", xid, fattr, committed);
             let res = WRITE3resok {
@@ -1232,7 +1232,7 @@ pub async fn nfsproc3_write<VFS>(
                 },
                 count: args.count,
                 committed, // Use the actually committed stability level
-                verf: context.vfs.serverid(),
+                verf: context.vfs.serverid(&context.auth),
             };
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;
@@ -1298,7 +1298,7 @@ pub async fn nfsproc3_commit<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -1320,7 +1320,7 @@ pub async fn nfsproc3_commit<VFS>(
     let id = id.unwrap();
 
     // get the object attributes before the commit
-    let pre_obj_attr = match context.vfs.getattr(&id).await {
+    let pre_obj_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1332,7 +1332,7 @@ pub async fn nfsproc3_commit<VFS>(
         Err(_) => nfs::pre_op_attr::Void,
     };
 
-    match context.vfs.commit(&id, args.offset, args.count).await {
+    match context.vfs.commit(&context.auth, &id, args.offset, args.count).await {
         Ok(fattr) => {
             debug!("commit success {:?} --> {:?}", xid, fattr);
             let res = COMMIT3resok {
@@ -1340,7 +1340,7 @@ pub async fn nfsproc3_commit<VFS>(
                     before: pre_obj_attr,
                     after: nfs::post_op_attr::attributes(fattr),
                 },
-                verf: context.vfs.serverid(),
+                verf: context.vfs.serverid(&context.auth),
             };
             make_success_reply(xid).serialize(output)?;
             nfs::nfsstat3::NFS3_OK.serialize(output)?;
@@ -1416,7 +1416,7 @@ pub async fn nfsproc3_create<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -1446,7 +1446,7 @@ pub async fn nfsproc3_create<VFS>(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1473,11 +1473,11 @@ pub async fn nfsproc3_create<VFS>(
         createmode3::GUARDED => {
             target_attributes.deserialize(input)?;
             debug!("create guarded {:?}", target_attributes);
-            if context.vfs.lookup(&dirid, &dirops.name).await.is_ok() {
+            if context.vfs.lookup(&context.auth, &dirid, &dirops.name).await.is_ok() {
                 // file exists. Fail with NFS3ERR_EXIST.
                 // Re-read dir attributes
                 // for post op attr
-                let post_dir_attr = match context.vfs.getattr(&dirid).await {
+                let post_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
                     Ok(v) => nfs::post_op_attr::attributes(v),
                     Err(_) => nfs::post_op_attr::Void,
                 };
@@ -1503,13 +1503,13 @@ pub async fn nfsproc3_create<VFS>(
     if matches!(createhow, createmode3::EXCLUSIVE) {
         // the API for exclusive is very slightly different
         // We are not returning a post op attribute
-        fid = context.vfs.create_exclusive(&dirid, &dirops.name).await;
+        fid = context.vfs.create_exclusive(&context.auth, &dirid, &dirops.name).await;
         postopattr = nfs::post_op_attr::Void;
     } else {
         // create!
         let res = context
             .vfs
-            .create(&dirid, &dirops.name, target_attributes)
+            .create(&context.auth, &dirid, &dirops.name, target_attributes)
             .await;
 
         (fid, postopattr) = res.map_or_else(
@@ -1520,7 +1520,7 @@ pub async fn nfsproc3_create<VFS>(
     }
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(&dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -1607,7 +1607,7 @@ pub async fn nfsproc3_setattr<VFS>(
     output: &mut impl Write,
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -1629,7 +1629,7 @@ pub async fn nfsproc3_setattr<VFS>(
 
     let ctime;
 
-    let pre_op_attr = match context.vfs.getattr(&id).await {
+    let pre_op_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1658,7 +1658,7 @@ pub async fn nfsproc3_setattr<VFS>(
         }
     }
 
-    match context.vfs.setattr(&id, args.new_attribute).await {
+    match context.vfs.setattr(&context.auth, &id, args.new_attribute).await {
         Ok(post_op_attr) => {
             debug!(" setattr success {:?} --> {:?}", xid, post_op_attr);
             let wcc_res = nfs::wcc_data {
@@ -1711,7 +1711,7 @@ pub async fn nfsproc3_remove<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -1737,7 +1737,7 @@ pub async fn nfsproc3_remove<VFS>(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1756,10 +1756,10 @@ pub async fn nfsproc3_remove<VFS>(
     };
 
     // delete!
-    let res = context.vfs.remove(&dirid, &dirops.name).await;
+    let res = context.vfs.remove(&context.auth, &dirid, &dirops.name).await;
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(&dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -1820,7 +1820,7 @@ pub async fn nfsproc3_rename<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -1865,7 +1865,7 @@ pub async fn nfsproc3_rename<VFS>(
     let to_dirid = to_dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_from_dir_attr = match context.vfs.getattr(&from_dirid).await {
+    let pre_from_dir_attr = match context.vfs.getattr(&context.auth, &from_dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1884,7 +1884,7 @@ pub async fn nfsproc3_rename<VFS>(
     };
 
     // get the object attributes before the write
-    let pre_to_dir_attr = match context.vfs.getattr(&to_dirid).await {
+    let pre_to_dir_attr = match context.vfs.getattr(&context.auth, &to_dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -1905,15 +1905,15 @@ pub async fn nfsproc3_rename<VFS>(
     // rename!
     let res = context
         .vfs
-        .rename(&from_dirid, &fromdirops.name, &to_dirid, &todirops.name)
+        .rename(&context.auth, &from_dirid, &fromdirops.name, &to_dirid, &todirops.name)
         .await;
 
     // Re-read dir attributes for post op attr
-    let post_from_dir_attr = match context.vfs.getattr(&from_dirid).await {
+    let post_from_dir_attr = match context.vfs.getattr(&context.auth, &from_dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
-    let post_to_dir_attr = match context.vfs.getattr(&to_dirid).await {
+    let post_to_dir_attr = match context.vfs.getattr(&context.auth, &to_dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -1990,7 +1990,7 @@ pub async fn nfsproc3_mkdir<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -2017,7 +2017,7 @@ pub async fn nfsproc3_mkdir<VFS>(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -2035,10 +2035,10 @@ pub async fn nfsproc3_mkdir<VFS>(
         }
     };
 
-    let res = context.vfs.mkdir(&dirid, &args.dirops.name).await;
+    let res = context.vfs.mkdir(&context.auth, &dirid, &args.dirops.name).await;
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(&dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -2115,7 +2115,7 @@ pub async fn nfsproc3_symlink<VFS>(
     context: &RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
     // if we do not have write capabilities
-    if !matches!(context.vfs.capabilities(), VFSCapabilities::ReadWrite) {
+    if !matches!(context.vfs.capabilities(&context.auth), VFSCapabilities::ReadWrite) {
         warn!("No write capabilities.");
         make_success_reply(xid).serialize(output)?;
         nfs::nfsstat3::NFS3ERR_ROFS.serialize(output)?;
@@ -2142,7 +2142,7 @@ pub async fn nfsproc3_symlink<VFS>(
     let dirid = dirid.unwrap();
 
     // get the object attributes before the write
-    let pre_dir_attr = match context.vfs.getattr(&dirid).await {
+    let pre_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => {
             let wccattr = nfs::wcc_attr {
                 size: v.size,
@@ -2163,6 +2163,7 @@ pub async fn nfsproc3_symlink<VFS>(
     let res = context
         .vfs
         .symlink(
+            &context.auth,
             &dirid,
             &args.dirops.name,
             &args.symlink.symlink_data,
@@ -2171,7 +2172,7 @@ pub async fn nfsproc3_symlink<VFS>(
         .await;
 
     // Re-read dir attributes for post op attr
-    let post_dir_attr = match context.vfs.getattr(&dirid).await {
+    let post_dir_attr = match context.vfs.getattr(&context.auth, &dirid).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(_) => nfs::post_op_attr::Void,
     };
@@ -2245,7 +2246,7 @@ pub async fn nfsproc3_readlink<VFS>(
     }
     let id = id.unwrap();
     // if the id does not exist, we fail
-    let symlink_attr = match context.vfs.getattr(&id).await {
+    let symlink_attr = match context.vfs.getattr(&context.auth, &id).await {
         Ok(v) => nfs::post_op_attr::attributes(v),
         Err(stat) => {
             make_success_reply(xid).serialize(output)?;
@@ -2254,7 +2255,7 @@ pub async fn nfsproc3_readlink<VFS>(
             return Ok(());
         }
     };
-    match context.vfs.readlink(&id).await {
+    match context.vfs.readlink(&context.auth, &id).await {
         Ok(path) => {
             debug!(" {:?} --> {:?}", xid, path);
             make_success_reply(xid).serialize(output)?;

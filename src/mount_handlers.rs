@@ -112,7 +112,7 @@ where
         mountstat3::MNT3ERR_NOENT.serialize(output)?;
         return Ok(());
     };
-    if let Ok(fileid) = context.vfs.path_to_handle(&path).await {
+    if let Ok(fileid) = context.vfs.path_to_handle(&context.auth, &path).await {
         let response = mountres3_ok {
             fhandle: fileid.into(),
             auth_flavors: vec![
