@@ -15,11 +15,11 @@ use crate::nfs_handlers;
 
 use crate::portmap;
 use crate::portmap_handlers;
+use crate::vfs::NFSFileSystem;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
-use crate::vfs::NFSFileSystem;
 // Information from RFC 5531
 // https://datatracker.ietf.org/doc/html/rfc5531
 
@@ -31,7 +31,10 @@ async fn handle_rpc<VFS>(
     input: &mut impl Read,
     output: &mut impl Write,
     mut context: RPCContext<VFS>,
-) -> Result<bool, anyhow::Error> where VFS: NFSFileSystem {
+) -> Result<bool, anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     let mut recv = rpc_msg::default();
     recv.deserialize(input)?;
     let xid = recv.xid;
@@ -47,10 +50,16 @@ async fn handle_rpc<VFS>(
             return Ok(true);
         }
 
-        if context.transaction_tracker.is_retransmission(xid, &context.client_addr) {
+        if context
+            .transaction_tracker
+            .is_retransmission(xid, &context.client_addr)
+        {
             // This is a retransmission
             // Drop the message and return
-            debug!("Retransmission detected, xid: {}, client_addr: {}, call: {:?}", xid, context.client_addr, call);
+            debug!(
+                "Retransmission detected, xid: {}, client_addr: {}, call: {:?}",
+                xid, context.client_addr, call
+            );
             return Ok(false);
         }
 
@@ -77,8 +86,11 @@ async fn handle_rpc<VFS>(
                 prog_unavail_reply_message(xid).serialize(output)?;
                 Ok(())
             }
-        }.map(|_| true);
-        context.transaction_tracker.mark_processed(xid, &context.client_addr);
+        }
+        .map(|_| true);
+        context
+            .transaction_tracker
+            .mark_processed(xid, &context.client_addr);
         res
     } else {
         error!("Unexpectedly received a Reply instead of a Call");
@@ -153,7 +165,7 @@ pub struct SocketMessageHandler<VFS: NFSFileSystem> {
     context: RPCContext<VFS>,
 }
 
-impl<VFS: NFSFileSystem + Clone + 'static> SocketMessageHandler<VFS> {
+impl<VFS: NFSFileSystem + 'static> SocketMessageHandler<VFS> {
     /// Creates a new SocketMessageHandler with the receiver for queued message replies
     pub fn new(
         context: &RPCContext<VFS>,

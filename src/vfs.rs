@@ -1,16 +1,15 @@
-use crate::nfs::*;
 use crate::nfs;
+use crate::nfs::*;
 use async_trait::async_trait;
-use std::sync::Once;
+use std::fmt::Debug;
+use std::sync::OnceLock;
 use std::time::SystemTime;
-use std::fmt::{Debug, Display};
-use std::convert::TryFrom;
-use crate::mount::fhandle3;
 
 #[derive(Default, Debug)]
 pub struct DirEntrySimple {
     pub fileid: fileid3,
     pub name: filename3,
+    pub cookie: fileid3,
 }
 
 #[derive(Default, Debug)]
@@ -25,6 +24,7 @@ pub struct DirEntry<H> {
     pub handle: H,
     pub name: filename3,
     pub attr: fattr3,
+    pub cookie: fileid3,
 }
 
 // Generic readdir result that uses custom file handle type
@@ -40,8 +40,9 @@ impl<H: Clone + Into<fileid3>> ReadDirResult<H> {
             .entries
             .iter()
             .map(|e| DirEntrySimple {
-                fileid: e.handle.clone().into(),
+                fileid: e.attr.fileid,
                 name: e.name.clone(),
+                cookie: e.cookie,
             })
             .collect();
         ReadDirSimpleResult {
@@ -51,19 +52,20 @@ impl<H: Clone + Into<fileid3>> ReadDirResult<H> {
     }
 }
 
-static mut GENERATION_NUMBER: u64 = 0;
-static GENERATION_NUMBER_INIT: Once = Once::new();
+static GENERATION_NUMBER: OnceLock<u64> = OnceLock::new();
 
 pub fn get_generation_number() -> u64 {
-    unsafe {
-        GENERATION_NUMBER_INIT.call_once(|| {
-            GENERATION_NUMBER = SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64;
-        });
-        GENERATION_NUMBER
-    }
+    *GENERATION_NUMBER.get_or_init(|| {
+        SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    })
+}
+
+/// Trait for converting an NFS file handle into a filesystem-specific handle type.
+pub trait FromNfsFh: Sized {
+    fn from_nfs_fh(fh: &nfs_fh3) -> Result<Self, nfsstat3>;
 }
 
 /// What capabilities are supported
@@ -78,11 +80,14 @@ pub enum VFSCapabilities {
 #[async_trait]
 pub trait NFSFileSystem: Send + Sync {
     /// The type used for file handles within this implementation
-    type FileHandle: Clone + Send + Sync + Debug  + 'static
-    + Into<nfs_fh3>
-    + Into<fhandle3>
-    + for<'a> TryFrom<&'a nfs_fh3, Error = nfsstat3>
-    + Into<fileid3>;
+    type FileHandle: Clone
+        + Send
+        + Sync
+        + Debug
+        + 'static
+        + Into<nfs_fh3>
+        + FromNfsFh
+        + Into<fileid3>;
 
     /// Returns the set of capabilities supported
     fn capabilities(&self) -> VFSCapabilities;
@@ -91,24 +96,36 @@ pub trait NFSFileSystem: Send + Sync {
     fn root_dir(&self) -> Self::FileHandle;
 
     /// Look up the handle of a path in a directory
-    async fn lookup(&self, dir_handle: &Self::FileHandle, filename: &filename3)
-                    -> Result<Self::FileHandle, nfsstat3>;
+    async fn lookup(
+        &self,
+        dir_handle: &Self::FileHandle,
+        filename: &filename3,
+    ) -> Result<Self::FileHandle, nfsstat3>;
 
     /// Returns the attributes of a file
     async fn getattr(&self, handle: &Self::FileHandle) -> Result<fattr3, nfsstat3>;
 
     /// Sets the attributes of a file
     /// Returns Err(nfsstat3::NFS3ERR_ROFS) if readonly
-    async fn setattr(&self, handle: &Self::FileHandle, setattr: sattr3) -> Result<fattr3, nfsstat3>;
+    async fn setattr(&self, handle: &Self::FileHandle, setattr: sattr3)
+        -> Result<fattr3, nfsstat3>;
 
     /// Reads the contents of a file returning (bytes, EOF)
-    async fn read(&self, handle: &Self::FileHandle, offset: u64, count: u32)
-                  -> Result<(Vec<u8>, bool), nfsstat3>;
+    async fn read(
+        &self,
+        handle: &Self::FileHandle,
+        offset: u64,
+        count: u32,
+    ) -> Result<(Vec<u8>, bool), nfsstat3>;
 
     /// Writes the contents of a file
     /// Returns Err(nfsstat3::NFS3ERR_ROFS) if readonly
-    async fn write(&self, handle: &Self::FileHandle, offset: u64, data: &[u8])
-                   -> Result<fattr3, nfsstat3>;
+    async fn write(
+        &self,
+        handle: &Self::FileHandle,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<fattr3, nfsstat3>;
 
     /// Creates a file with the specified attributes
     /// Returns Err(nfsstat3::NFS3ERR_ROFS) if readonly
@@ -137,8 +154,11 @@ pub trait NFSFileSystem: Send + Sync {
 
     /// Removes a file
     /// Returns Err(nfsstat3::NFS3ERR_ROFS) if readonly
-    async fn remove(&self, dir_handle: &Self::FileHandle, filename: &filename3)
-                    -> Result<(), nfsstat3>;
+    async fn remove(
+        &self,
+        dir_handle: &Self::FileHandle,
+        filename: &filename3,
+    ) -> Result<(), nfsstat3>;
 
     /// Renames a file
     /// Returns Err(nfsstat3::NFS3ERR_ROFS) if readonly
@@ -190,7 +210,10 @@ pub trait NFSFileSystem: Send + Sync {
         data: &[u8],
         _stability: stable_how,
     ) -> Result<(fattr3, stable_how), nfsstat3> {
-        Ok((self.write(handle, offset, data).await?, stable_how::FILE_SYNC))
+        Ok((
+            self.write(handle, offset, data).await?,
+            stable_how::FILE_SYNC,
+        ))
     }
 
     /// Commit pending writes
@@ -204,10 +227,7 @@ pub trait NFSFileSystem: Send + Sync {
     }
 
     /// Get static file system Information
-    async fn fsinfo(
-        &self,
-        root_handle: &Self::FileHandle,
-    ) -> Result<fsinfo3, nfsstat3> {
+    async fn fsinfo(&self, root_handle: &Self::FileHandle) -> Result<fsinfo3, nfsstat3> {
         let dir_attr: nfs::post_op_attr = match self.getattr(root_handle).await {
             Ok(v) => nfs::post_op_attr::attributes(v),
             Err(_) => nfs::post_op_attr::Void,
@@ -216,7 +236,7 @@ pub trait NFSFileSystem: Send + Sync {
         let res = fsinfo3 {
             obj_attributes: dir_attr,
             rtmax: 1024 * 1024,
-            rtpref: 1024 * 124,
+            rtpref: 1024 * 1024,
             rtmult: 1024 * 1024,
             wtmax: 1024 * 1024,
             wtpref: 1024 * 1024,
@@ -227,7 +247,7 @@ pub trait NFSFileSystem: Send + Sync {
                 seconds: 0,
                 nseconds: 1000000,
             },
-            properties: nfs::FSF_SYMLINK | nfs::FSF_HOMOGENEOUS | nfs::FSF_CANSETTIME,
+            properties: nfs::FSF_HOMOGENEOUS | nfs::FSF_CANSETTIME,
         };
         Ok(res)
     }

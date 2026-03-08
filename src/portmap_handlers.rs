@@ -1,12 +1,12 @@
 use crate::context::RPCContext;
 use crate::portmap;
 use crate::rpc::*;
+use crate::vfs::NFSFileSystem;
 use crate::xdr::*;
 use num_derive::{FromPrimitive, ToPrimitive};
 use num_traits::cast::FromPrimitive;
 use std::io::{Read, Write};
 use tracing::{debug, error};
-use crate::vfs::NFSFileSystem;
 /*
  From RFC 1057 Appendix A
 
@@ -41,7 +41,10 @@ pub fn handle_portmap<VFS>(
     input: &mut impl Read,
     output: &mut impl Write,
     context: &RPCContext<VFS>,
-) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     if call.vers != portmap::VERSION {
         error!(
             "Invalid Portmap Version number {} != {}",
@@ -84,7 +87,10 @@ pub fn pmapproc_getport<VFS>(
     read: &mut impl Read,
     output: &mut impl Write,
     context: &RPCContext<VFS>,
-) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     let mut mapping = portmap::mapping::default();
     mapping.deserialize(read)?;
     debug!("pmapproc_getport({:?}, {:?}) ", xid, mapping);

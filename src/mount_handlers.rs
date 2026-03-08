@@ -1,5 +1,6 @@
 use crate::context::RPCContext;
 use crate::mount::*;
+use crate::nfs;
 use crate::rpc::*;
 use crate::vfs::NFSFileSystem;
 use crate::xdr::*;
@@ -114,7 +115,7 @@ where
     };
     if let Ok(fileid) = context.vfs.path_to_handle(&path).await {
         let response = mountres3_ok {
-            fhandle: fileid.into(),
+            fhandle: Into::<nfs::nfs_fh3>::into(fileid).data,
             auth_flavors: vec![
                 auth_flavor::AUTH_NULL.to_u32().unwrap(),
                 auth_flavor::AUTH_UNIX.to_u32().unwrap(),
@@ -195,7 +196,10 @@ pub async fn mountproc3_umnt<VFS>(
     input: &mut impl Read,
     output: &mut impl Write,
     context: &RPCContext<VFS>,
-) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     let mut path = dirpath::new();
     path.deserialize(input)?;
     let utf8path = std::str::from_utf8(&path).unwrap_or_default();
@@ -213,7 +217,10 @@ pub async fn mountproc3_umnt_all<VFS>(
     _input: &mut impl Read,
     output: &mut impl Write,
     context: &RPCContext<VFS>,
-) -> Result<(), anyhow::Error> where VFS: NFSFileSystem {
+) -> Result<(), anyhow::Error>
+where
+    VFS: NFSFileSystem,
+{
     debug!("mountproc3_umnt_all({:?}) ", xid);
     if let Some(ref chan) = context.mount_signal {
         let _ = chan.send(false).await;

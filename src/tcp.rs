@@ -1,17 +1,17 @@
 use crate::context::RPCContext;
 use crate::rpcwire::*;
+use crate::transaction_tracker::TransactionTracker;
 use crate::vfs::NFSFileSystem;
 use anyhow;
 use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::{io, net::IpAddr};
 use std::time::Duration;
+use std::{io, net::IpAddr};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
-use crate::transaction_tracker::TransactionTracker;
 
 /// A NFS Tcp Connection Handler
 pub struct NFSTcpListener<T: NFSFileSystem + Send + Sync + 'static> {
@@ -32,7 +32,7 @@ pub fn generate_host_ip(hostnum: u16) -> String {
 }
 
 /// processes an established socket
-async fn process_socket<VFS: NFSFileSystem + Clone + 'static>(
+async fn process_socket<VFS: NFSFileSystem + 'static>(
     mut socket: tokio::net::TcpStream,
     context: RPCContext<VFS>,
 ) -> Result<(), anyhow::Error> {
@@ -191,7 +191,7 @@ impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcpListener<T> {
 }
 
 #[async_trait]
-impl<T: NFSFileSystem + Send + Sync + Clone + 'static> NFSTcp for NFSTcpListener<T> {
+impl<T: NFSFileSystem + Send + Sync + 'static> NFSTcp for NFSTcpListener<T> {
     /// Gets the true listening port. Useful if the bound port number is 0
     fn get_listen_port(&self) -> u16 {
         let addr = self.listener.local_addr().unwrap();

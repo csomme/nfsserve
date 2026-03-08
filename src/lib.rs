@@ -1,4 +1,7 @@
 #![cfg_attr(feature = "strict", deny(warnings))]
+// num_derive's FromPrimitive/ToPrimitive macros generate non-local impls; suppress
+// until num_derive is updated.
+#![allow(non_local_definitions)]
 
 mod context;
 mod rpc;
@@ -19,5 +22,5 @@ mod nfs_handlers;
 pub mod fs_util;
 
 pub mod tcp;
-pub mod vfs;
 mod transaction_tracker;
+pub mod vfs;

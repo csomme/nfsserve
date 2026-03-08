@@ -571,7 +571,6 @@ pub enum stable_how {
 }
 XDREnumSerde!(stable_how);
 
-
 /// We define the root handle here
 pub fn get_root_mount_handle() -> Vec<u8> {
     vec![0]
